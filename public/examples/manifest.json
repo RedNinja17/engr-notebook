@@ -1,0 +1,11 @@
+{
+  "projects": [
+    {
+      "id": "robotic-arm",
+      "name": "Custom 3D Printed Robotic Arm",
+      "description": "A starter engineering notebook with an assembly graph and bill of materials.",
+      "project": "/examples/projects/robotic-arm.json"
+    }
+  ],
+  "assets": []
+}
