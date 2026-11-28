@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   ReactFlow,
   Background,
@@ -11,27 +11,51 @@ import '@xyflow/react/dist/style.css';
 
 import { EngineeringNodeComponent } from './components/EngineeringNode';
 import { CADViewer } from './components/CADViewer';
-import type { ProjectFile, EngineeringNodeData, EngineeringNode, Part, SketchStroke } from './types/project';
-import { Cpu, Plus, ShoppingBag, Sliders, Trash2, Layers, Download, Upload, Edit3, X } from 'lucide-react';
+import { Cpu, Plus, ShoppingBag, Sliders, Trash2, Layers, Download, Upload, Edit3 } from 'lucide-react';
 
 const nodeTypes = {
   engineeringNode: EngineeringNodeComponent,
 };
 
-import { initialProject } from './data/initialProject';
+import type {
+  ProjectFile,
+  EngineeringNodeData,
+  EngineeringNode,
+  Part,
+  SketchStroke,
+  CADPart
+} from './types/project';
 import calculatePrintCost from './utils/printCost';
+import useProject from './hooks/useProject';
+import { Sketchpad } from './components/Sketchpad';
+
+
+function getPrintCost(cadAsset: CADPart | undefined): number {
+  if (!cadAsset) return 0;
+
+  return calculatePrintCost(
+    cadAsset.calculatedVolumeCM3,
+    cadAsset.filamentDensity,
+    cadAsset.infillPercent,
+    cadAsset.waste,
+    cadAsset.pricePerGram
+  );
+}
 
 export default function App() {
-  const [project, setProject] = useState<ProjectFile>(initialProject);
-  const nodes = project.nodes;
-  const edges = project.edges;
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const {
+    project,
+    nodes,
+    edges,
+    setNodes,
+    setEdges,
+    onNodesChange,
+    onEdgesChange,
+    loadProject,
+  } = useProject();
 
-  // Sketchpad state
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [isSketchOpen, setIsSketchOpen] = useState(false);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [currentStrokes, setCurrentStrokes] = useState<SketchStroke[]>([]);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const onConnect = useCallback((params: Connection) => {
     setEdges((eds) => addEdge(params, eds));
@@ -45,7 +69,6 @@ export default function App() {
     setSelectedNodeId(null);
   };
 
-  // Double click edge to edit label
   const onEdgeDoubleClick = (_: React.MouseEvent, edge: any) => {
     const newLabel = prompt("Enter new connection label (e.g. 'Bolts onto', 'Connects via'):", edge.label || '');
     if (newLabel !== null) {
@@ -62,7 +85,6 @@ export default function App() {
 
   const selectedNode = nodes.find(n => n.id === selectedNodeId);
 
-  // --- CREATE NEW NODE ---
   const handleCreateNode = () => {
     const newId = `node-${Date.now()}`;
     const newNode: EngineeringNode = {
@@ -73,13 +95,11 @@ export default function App() {
         title: 'New Subsystem',
         notes: '',
         cadAsset: {
-          pointerPath: '',
           calculatedVolumeCM3: 50.0,
           filamentDensity: project.defaults.filamentDensity,
           infillPercent: 20,
           waste: project.defaults.waste,
           pricePerGram: project.defaults.pricePerGram,
-          cachedPrintCost: calculatePrintCost(50.0, project.defaults.filamentDensity, 20, project.defaults.waste, project.defaults.pricePerGram)
         },
         parts: [],
         media: [],
@@ -111,13 +131,6 @@ export default function App() {
   const handleUpdateCADField = (field: string, value: number) => {
     if (!selectedNode || !selectedNode.data.cadAsset) return;
     const cad = { ...selectedNode.data.cadAsset, [field]: value };
-    cad.cachedPrintCost = calculatePrintCost(
-      cad.calculatedVolumeCM3,
-      cad.filamentDensity,
-      cad.infillPercent,
-      cad.waste,
-      cad.pricePerGram
-    );
     updateSelectedNodeData({ cadAsset: cad });
   };
 
@@ -127,6 +140,7 @@ export default function App() {
     const newPart: Part = {
       id: 'part-' + Date.now(),
       name: 'New Component',
+      unit: 'piece',
       unitPrice: 0.00,
       quantity: 1,
     };
@@ -162,9 +176,7 @@ export default function App() {
       const projectResponse = await fetch(firstExample.project);
       if (!projectResponse.ok) throw new Error('Could not load the example project file.');
       const exampleProject = await projectResponse.json() as ProjectFile;
-      setProject(exampleProject);
-      setNodes(exampleProject.nodes);
-      setEdges(exampleProject.edges);
+      loadProject(exampleProject);
       setSelectedNodeId(null);
     } catch (err) {
       console.error('Example project load failed:', err);
@@ -196,9 +208,7 @@ export default function App() {
       fileReader.onload = (event) => {
         try {
           const parsed = JSON.parse(event.target?.result as string) as ProjectFile;
-          setProject(parsed);
-          setNodes(parsed.nodes);
-          setEdges(parsed.edges);
+          loadProject(parsed);
           setSelectedNodeId(null);
         } catch (err) {
           alert("Invalid project JSON file.");
@@ -207,60 +217,16 @@ export default function App() {
     }
   };
 
-  // --- SKETCHPAD LOGIC ---
-  const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    setIsDrawing(true);
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    setCurrentStrokes(prev => [...prev, { points: [[x, y, 0.5]], color: '#38bdf8', size: 3 }]);
-  };
-
-  const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    setCurrentStrokes(prev => {
-      const lastStroke = prev[prev.length - 1];
-      if (!lastStroke) return prev;
-      const updatedStroke = { ...lastStroke, points: [...lastStroke.points, [x, y, 0.5]] };
-      return [...prev.slice(0, -1), updatedStroke];
-    });
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    currentStrokes.forEach(stroke => {
-      ctx.strokeStyle = stroke.color;
-      ctx.lineWidth = stroke.size;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      stroke.points.forEach((pt, idx) => {
-        if (idx === 0) ctx.moveTo(pt[0], pt[1]);
-        else ctx.lineTo(pt[0], pt[1]);
-      });
-      ctx.stroke();
-    });
-  };
-
-  const stopDrawing = () => {
-    setIsDrawing(false);
-  };
-
-  const saveSketchToNode = () => {
+  const saveSketchToNode = (strokes: SketchStroke[]) => {
     if (!selectedNode) return;
+
     const mediaItem = {
       id: 'sketch-' + Date.now(),
       type: 'sketch' as const,
-      strokes: currentStrokes,
-      caption: 'Quick mechanical sketch'
+      strokes,
+      caption: 'Quick mechanical sketch',
     };
+
     const currentMedia = selectedNode.data.media || [];
     updateSelectedNodeData({ media: [...currentMedia, mediaItem] });
     setIsSketchOpen(false);
@@ -268,7 +234,7 @@ export default function App() {
 
   const totalBOMCost = nodes.reduce((sum, node) => {
     const partsSum = (node.data.parts || []).reduce((pSum, part) => pSum + (part.unitPrice * part.quantity), 0);
-    const printCost = node.data.cadAsset?.cachedPrintCost || 0;
+    const printCost = getPrintCost(node.data.cadAsset);
     return sum + partsSum + printCost;
   }, 0);
 
@@ -340,7 +306,7 @@ export default function App() {
               <div className="space-y-2 mt-4">
                 {nodes.map(n => {
                   const nodeParts = n.data.parts || [];
-                  const printCost = n.data.cadAsset?.cachedPrintCost || 0;
+                  const printCost = getPrintCost(n.data.cadAsset);
                   return (
                     <React.Fragment key={n.id}>
                       {printCost > 0 && (
@@ -413,13 +379,12 @@ export default function App() {
               <div className="p-3 rounded bg-zinc-950 border border-zinc-800 space-y-3">
                 <div className="flex items-center justify-between text-xs font-medium text-zinc-300">
                   <span className="flex items-center gap-1.5"><Layers className="w-3.5 h-3.5 text-cyan-400" /> CAD File & Print Cost</span>
-                  <span className="font-mono text-cyan-400 font-bold">${selectedNode.data.cadAsset?.cachedPrintCost?.toFixed(2) || '0.00'}</span>
+                  <span className="font-mono text-cyan-400 font-bold">${getPrintCost(selectedNode.data.cadAsset).toFixed(2)}</span>
                 </div>
 
                 {/* --- PASSING NODE ID TO CACHE CAD FILES LOCALLY --- */}
                 <CADViewer
                   nodeId={selectedNode.id}
-                  fileUrl={selectedNode.data.cadAsset?.pointerPath || undefined}
                 />
 
                 <div className="grid grid-cols-2 gap-2 text-[11px] pt-1">
@@ -547,59 +512,16 @@ export default function App() {
             <Plus className="w-4 h-4" /> Add Node to Blueprint
           </button>
         </div>
-
       </div>
-
-      {/* --- QUICK SKETCHPAD MODAL --- */}
-      {isSketchOpen && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-[700px] flex flex-col shadow-2xl overflow-hidden">
-            <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
-              <h3 className="font-bold text-sm text-cyan-400 flex items-center gap-2">
-                <Edit3 className="w-4 h-4" /> Quick Sketchpad — {selectedNode?.data.title}
-              </h3>
-              <button
-                onClick={() => setIsSketchOpen(false)}
-                className="text-zinc-400 hover:text-zinc-100 p-1 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="p-4 bg-zinc-950 flex justify-center">
-              <canvas
-                ref={canvasRef}
-                width={640}
-                height={380}
-                onMouseDown={startDrawing}
-                onMouseMove={draw}
-                onMouseUp={stopDrawing}
-                onMouseLeave={stopDrawing}
-                className="bg-zinc-900 rounded-lg border border-zinc-800 cursor-crosshair shadow-inner"
-              />
-            </div>
-            <div className="p-4 border-t border-zinc-800 flex justify-end gap-2">
-              <button
-                onClick={() => {
-                  setCurrentStrokes([]);
-                  const canvas = canvasRef.current;
-                  const ctx = canvas?.getContext('2d');
-                  if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-                }}
-                className="px-4 py-2 rounded bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-300 font-medium cursor-pointer"
-              >
-                Clear
-              </button>
-              <button
-                onClick={saveSketchToNode}
-                className="px-4 py-2 rounded bg-cyan-500 hover:bg-cyan-400 text-xs text-zinc-950 font-semibold cursor-pointer"
-              >
-                Save Sketch to Node
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
+      <div>
+        {isSketchOpen && selectedNode && (
+          <Sketchpad
+            title={selectedNode.data.title}
+            onSave={saveSketchToNode}
+            onClose={() => setIsSketchOpen(false)}
+          />
+        )}
+      </div>
     </div>
   );
 }
